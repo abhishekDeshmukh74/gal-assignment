@@ -23,6 +23,14 @@ _ANSWER_SYSTEM_PROMPT = (
 _JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
+def _get(obj: Any, key: str) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
 class OpenRouterLLMClient:
     provider_name = "openrouter"
 
@@ -33,10 +41,23 @@ class OpenRouterLLMClient:
             raise RuntimeError("Missing dependency: install 'openrouter'.") from exc
         self.model = model or os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
         self._client = OpenRouter(api_key=api_key)
-        self._stats: dict[str, int] = {
-            "llm_calls": 0, "prompt_tokens": 0,
-            "completion_tokens": 0, "total_tokens": 0,
-        }
+        self._stats = self._zero_stats()
+
+    @staticmethod
+    def _zero_stats() -> dict[str, int]:
+        return {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int:
+        try:
+            return int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def pop_stats(self) -> dict[str, Any]:
+        out = dict(self._stats)
+        self._stats = self._zero_stats()
+        return out
 
     def _chat(self, messages: list[dict[str, str]], temperature: float, max_tokens: int) -> str:
         res = self._client.chat.send(
@@ -46,11 +67,22 @@ class OpenRouterLLMClient:
             max_tokens=max_tokens,
             stream=False,
         )
+        # ---- Token accounting (HARD REQUIREMENT) -----------------------
+        usage = getattr(res, "usage", None)
+        prompt_tokens = self._coerce_int(_get(usage, "prompt_tokens"))
+        completion_tokens = self._coerce_int(_get(usage, "completion_tokens"))
+        total_tokens = self._coerce_int(_get(usage, "total_tokens"))
+
         choices = getattr(res, "choices", None) or []
         if not choices:
             raise RuntimeError("OpenRouter response contained no choices.")
         content = getattr(getattr(choices[0], "message", None), "content", None)
         if not isinstance(content, str):
             raise RuntimeError("OpenRouter response content is not text.")
+        content = content.strip()
+
         self._stats["llm_calls"] += 1
-        return content.strip()
+        self._stats["prompt_tokens"] += prompt_tokens
+        self._stats["completion_tokens"] += completion_tokens
+        self._stats["total_tokens"] += total_tokens
+        return content
