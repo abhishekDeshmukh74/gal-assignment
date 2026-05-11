@@ -60,13 +60,22 @@ class OpenRouterLLMClient:
         return out
 
     def _chat(self, messages: list[dict[str, str]], temperature: float, max_tokens: int) -> str:
-        res = self._client.chat.send(
+        # gpt-5-nano is a reasoning model; it consumes max_tokens on hidden
+        # reasoning. Request minimal effort so visible output gets the budget.
+        send_kwargs: dict[str, Any] = dict(
             messages=messages,
             model=self.model,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens,  # raised to 512 to give reasoning headroom
             stream=False,
         )
+        try:
+            send_kwargs["reasoning"] = {"effort": "minimal"}
+            res = self._client.chat.send(**send_kwargs)
+        except Exception:
+            send_kwargs.pop("reasoning", None)
+            res = self._client.chat.send(**send_kwargs)
+
         usage = getattr(res, "usage", None)
         prompt_tokens = self._coerce_int(_get(usage, "prompt_tokens"))
         completion_tokens = self._coerce_int(_get(usage, "completion_tokens"))
@@ -81,8 +90,6 @@ class OpenRouterLLMClient:
         content = content.strip()
 
         if total_tokens == 0:
-            # Rough heuristic: ~4 chars per token. Keeps efficiency metrics
-            # non-zero when a provider drops the usage block.
             prompt_chars = sum(len(m.get("content", "")) for m in messages)
             prompt_tokens = prompt_tokens or max(1, prompt_chars // 4)
             completion_tokens = completion_tokens or max(1, len(content) // 4)
