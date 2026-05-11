@@ -1,143 +1,390 @@
-# Senior Full Stack Engineer (GenAI-Labs) Take-Home Assignment
+# GenAI Labs — Analytics Pipeline Assignment
 
-## Timebox
-Plan for **4-6 hours**.
+A production-grade, LLM-driven analytics pipeline over a 1 million-row gaming & mental health dataset. Accepts natural-language questions, generates and validates SQL, executes it against a local SQLite database, and produces a concise natural-language answer.
 
-## Goal
-Optimize a baseline LLM-driven analytics pipeline for a single-table SQL dataset while preserving output quality.
+---
 
-Key metrics include **end-to-end response time** from prompt ingest to final answer, **resources consumed** (tokens), and **quality of the output**.
+## Table of Contents
 
-## Current Status
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Pipeline Stages](#pipeline-stages)
+- [Observability](#observability)
+- [SQL Validation Layers](#sql-validation-layers)
+- [Running Tests](#running-tests)
+- [Benchmark](#benchmark)
+- [Visualising Results](#visualising-results)
+- [CI/CD](#cicd)
+- [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
+- [Benchmark Results](#benchmark-results)
 
-**This codebase is a starting point for the assignment and is not yet fully functional.** Several core components require implementation to make the pipeline production-ready:
+---
 
-- Token counting infrastructure (skeleton provided in `src/llm_client.py`, actual counting logic needs implementation)
-- SQL validation and quality checks
-- Result validation and answer quality verification
-- Comprehensive observability (logging, metrics, tracing)
-- Edge case handling and error recovery
+## Architecture
 
-The baseline pipeline will run, but key functionality—particularly around validation, observability, and efficiency optimizations—remains incomplete. See `Assignment Tasks` below and `CHECKLIST.md` for specific implementation requirements.
-
-## What You Get
-- Baseline Python pipeline with stages:
-  - SQL generation (real LLM call)
-  - SQL validation
-  - SQL execution
-  - Answer generation (real LLM call)
-- Single SQLite table with gaming and mental health survey data
-- Public tests and benchmark script
-- OpenRouter integration via [OpenRouter Python SDK](https://pypi.org/project/openrouter/)
-- Configurable model (default: `openai/gpt-5-nano`, override via `OPENROUTER_MODEL`)
-
-## Assignment Tasks
-
-1. **Make the system production-ready.** What does production-ready mean to you? Demonstrate whatever you consider essential.
-
-2. **Ensure the system can generate accurate SQL queries.** The baseline may not work correctly out of the box. Identify what's missing and implement what's needed for reliable SQL generation.
-
-3. **Maintain or improve answer correctness.** The system should handle edge cases gracefully.
-
-4. **Design appropriate observability for this analytics pipeline.** Implement tracing, metrics, and logging as you see fit for production use.
-
-5. **Implement a validation framework to ensure answer quality.** Consider SQL validation, result validation, and answer quality checks. (Hint: think about what SQL validation means in the context of an analytics pipeline.)
-
-6. **Consider efficiency.** Optimize end-to-end latency, token usage, and efficient LLM requests while preserving quality.
-
-## Hard Requirements
-1. Do not modify existing public tests in `tests/test_public.py`.
-2. Public tests must pass.
-3. Keep the project runnable locally with standard Python.
-4. Output contract: `AnalyticsPipeline.run()` must return a `PipelineOutput` instance, with each stage producing outputs that conform to the type schemas in `src/types.py`. This enables automated evaluation; submissions that deviate from it cannot be graded correctly.
-5. Token counting must be implemented. The baseline includes a skeleton for tracking LLM usage statistics in `src/llm_client.py`, but you must implement the actual token counting. This is required for the efficiency evaluation to work.
-
-## Production Readiness Requirements
-
-Your submission **must include** a completed `CHECKLIST.md` file documenting your design decisions and implementation approach across all relevant areas.
-
-## Requirements
-
-- **Python:** 3.13+
-- **Dependencies:** `openrouter`, `pandas` (see `requirements.txt`)
-
-## Setup
-
-### Data Setup
-
-The dataset (~160MB) is not included in this repository. Download it before running the pipeline:
-
-1. Go to [Kaggle - Gaming and Mental Health](https://www.kaggle.com/datasets/sharmajicoder/gaming-and-mental-health?select=gaming_mental_health_10M_40features.csv)
-2. Download `gaming_mental_health_10M_40features.csv` (select this file from the dataset)
-3. Place the file in the `data/` directory
-4. **Important:** Ensure you download and use all 39 columns—do not drop any columns during download or import
-
-The Kaggle page provides a more detailed description of the dataset, including column definitions and data sources.
-
-```bash
-python3 -m pip install -r requirements.txt
-python3 scripts/gaming_csv_to_db.py
-python3 -m unittest discover -s tests -p "test_public.py"
+```
+Question (natural language)
+        │
+        ▼
+┌─────────────────────────┐
+│   AnalyticsPipeline     │  ← schema introspected once at init (PRAGMA)
+│                         │
+│  1. SQL Generation      │  ← LLM call #1 (temp=0.0, max_tokens=512)
+│  2. SQL Validation      │  ← 5-layer validator, no LLM call
+│  3. SQL Execution       │  ← SQLite, fetch_limit=100
+│  4. Answer Generation   │  ← LLM call #2, short-circuited on null/empty
+│                         │
+│  Each stage → stage_span│  ← JSON log + metrics counter/histogram
+└─────────────────────────┘
+        │
+        ▼
+PipelineOutput(status, sql, rows, answer, timings, llm_stats, request_id)
 ```
 
-### OpenRouter Setup
+Status values: `success` · `invalid_sql` · `unanswerable` · `error`
 
-This project uses [OpenRouter](https://openrouter.ai/) to access LLMs for SQL generation and answer synthesis. OpenRouter provides a unified API for many models across providers. It offers a **free tier** that lets you use certain models at no cost, which is sufficient for this assignment.
+---
 
-To get started:
+## Project Structure
 
-1. **Create an account** at [openrouter.ai](https://openrouter.ai/)
-2. **Create an API key** in your account settings
-3. **Set the API key** in your environment (or copy from `.env.example`):
-
-```bash
-set OPENROUTER_API_KEY=<your_key>
+```
+assignment_v0.2/
+├── src/
+│   ├── types.py            # Dataclass contracts (unchanged from baseline)
+│   ├── llm_client.py       # OpenRouter transport, token accounting, prompts
+│   ├── pipeline.py         # SQLValidator, SQLiteExecutor, AnalyticsPipeline
+│   └── observability.py    # JSON logging, Metrics (p50/p95), stage_span
+├── scripts/
+│   ├── benchmark.py        # Benchmark runner (--runs, --save-samples)
+│   ├── visualize.py        # Chart generator from benchmark JSONL
+│   └── gaming_csv_to_db.py # Kaggle CSV → SQLite ingestion
+├── tests/
+│   ├── test_public.py      # 5 integration tests (unmodified)
+│   ├── test_unit.py        # 23 unit tests (no API key required)
+│   └── public_prompts.json # Prompts used by integration tests
+├── data/                   # SQLite DB and sample JSONL (gitignored)
+├── .github/
+│   └── workflows/
+│       └── ci.yml          # Lint + unit + integration CI jobs
+├── pyproject.toml          # ruff + black config
+├── requirements.txt        # Runtime dependencies
+├── CHECKLIST.md            # Assignment production-readiness checklist
+└── SOLUTION_NOTES.md       # Design rationale and measured impact
 ```
 
-On Linux/macOS: `export OPENROUTER_API_KEY=<your_key>`
+---
+
+## Quick Start
+
+### 1. Install dependencies
+
+```bash
+pip install -r requirements.txt
+
+# Dev / lint tools
+pip install ruff black
+
+# Visualization (optional)
+pip install matplotlib pandas
+```
+
+### 2. Set your API key
+
+```bash
+cp .env.example .env        # or create .env manually
+# Add: OPENROUTER_API_KEY=sk-or-...
+```
+
+The pipeline defaults to model `openai/gpt-5-nano`. Override with `OPENROUTER_MODEL`.
+
+### 3. Build the database
+
+Download the dataset from Kaggle (requires a Kaggle account):
+
+```bash
+# One-time Kaggle setup
+mkdir -p ~/.kaggle
+echo '{"username":"<you>","key":"<kaggle_api_key>"}' > ~/.kaggle/kaggle.json
+chmod 600 ~/.kaggle/kaggle.json
+
+# Download and build SQLite (274 MB, 1 M rows)
+PYTHONPATH=. python3 scripts/gaming_csv_to_db.py
+```
+
+The database is written to `data/gaming_mental_health.sqlite`.
+
+### 4. Run a quick pipeline smoke test
+
+```bash
+PYTHONPATH=. python3 - <<'EOF'
+from src.pipeline import AnalyticsPipeline
+from src.types import PipelineInput
+
+p = AnalyticsPipeline("data/gaming_mental_health.sqlite")
+out = p.run(PipelineInput("What is the average anxiety score by gender?"))
+print(out.status, out.answer)
+EOF
+```
+
+---
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENROUTER_API_KEY` | *(required)* | OpenRouter API key |
+| `OPENROUTER_MODEL` | `openai/gpt-5-nano` | Model identifier passed to OpenRouter |
+| `LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+Constructor-level knobs for `AnalyticsPipeline`:
+
+```python
+AnalyticsPipeline(
+    db_path="data/gaming_mental_health.sqlite",
+    fetch_limit=100,          # max rows returned from SQLite
+    enable_sql_repair=False,  # retry once on executor error (adds 1 LLM call)
+)
+```
+
+---
+
+## Pipeline Stages
+
+### Stage 1 — SQL Generation
+
+`OpenRouterLLMClient.generate_sql()` sends a structured system prompt that includes:
+- The full table schema (introspected via `PRAGMA table_info` at init)
+- Instructions to return `{"sql": "..."}` or `{"sql": null}` (JSON envelope)
+- SELECT-only constraint, aggregate-or-LIMIT requirement, age-bucketing hint
+- `temperature=0.0` for deterministic output, `max_tokens=512`
+
+The model is configured with `reasoning={"effort": "minimal"}` (critical for gpt-5-nano, which otherwise consumes the entire token budget on hidden reasoning tokens).
+
+Token accounting reads `response.usage.{prompt_tokens, completion_tokens, total_tokens}` with a `chars // 4` fallback when the SDK returns no usage data.
+
+### Stage 2 — SQL Validation
+
+Five-layer `SQLValidator` (no LLM call, see [SQL Validation Layers](#sql-validation-layers)).
+
+### Stage 3 — SQL Execution
+
+`SQLiteExecutor` runs the *validated* SQL (not the raw model output) against the local SQLite database. Row fetch is capped at `fetch_limit=100`. Any exception is caught and surfaced as `executor.error` — it never bubbles up.
+
+### Stage 4 — Answer Generation
+
+`OpenRouterLLMClient.generate_answer()` is **short-circuited** in two cases (saving one LLM call):
+- SQL was null → fixed "cannot answer with available schema" response
+- SQL ran but returned zero rows → fixed "no data found" response
+
+When rows exist, the answer prompt is pinned to "use ONLY the provided rows, 1–3 sentences". The row payload is capped at 20 rows with strings truncated to 200 chars. `temperature=0.2`.
+
+### Status Derivation
+
+Priority order (first match wins):
+
+| Condition | Status |
+|---|---|
+| Generation transport error | `error` |
+| Model returned `null` SQL | `unanswerable` |
+| Validator rejected SQL | `invalid_sql` |
+| Executor raised exception | `error` |
+| Otherwise | `success` |
+
+---
+
+## Observability
+
+All observability lives in `src/observability.py` — zero third-party dependencies.
+
+### JSON Logging
+
+Every log record is a single-line JSON object:
+
+```json
+{
+  "ts": "2026-05-11T10:22:01.123Z",
+  "level": "INFO",
+  "logger": "pipeline",
+  "msg": "stage.end",
+  "request_id": "3f9a1c02e8b4",
+  "stage": "sql_generation",
+  "duration_ms": 1842,
+  "valid": true
+}
+```
+
+Structured fields: `request_id`, `stage`, `duration_ms`, `valid`, `row_count`, `total_tokens`, `error`.
+
+Logs are written to **stderr**. Redirect to a file or pipe to `jq` for filtering:
+
+```bash
+PYTHONPATH=. python3 scripts/benchmark.py 2>logs/run.jsonl
+cat logs/run.jsonl | python3 -c "import sys,json; [print(json.loads(l)['msg'], json.loads(l).get('duration_ms','')) for l in sys.stdin]"
+```
+
+### Metrics
+
+`Metrics` (accessible via `pipeline.get_metrics()`) exposes:
+
+| Metric | Type | Description |
+|---|---|---|
+| `stage.<name>.ok` | Counter | Successful stage completions |
+| `stage.<name>.error` | Counter | Stage exceptions |
+| `stage.<name>.duration_ms` | Histogram (p50/p95) | Wall-clock time per stage |
+| `pipeline.status.<status>` | Counter | Per-status outcome count |
+| `llm.chat.duration_ms` | Histogram | Per-LLM-call latency |
+| `llm_tokens_total` | Counter | Cumulative tokens across all calls |
+| `llm_calls_total` | Counter | Cumulative LLM call count |
+
+The API maps 1:1 onto `prometheus_client.Counter` / `Histogram` for a production deployment.
+
+### Request Correlation
+
+A 12-character hex `request_id` is auto-generated per request (or accepted from the caller via `PipelineInput.request_id`). It appears in every log line and in `PipelineOutput.request_id`.
+
+---
+
+## SQL Validation Layers
+
+`SQLValidator.validate()` runs five gates in order:
+
+1. **Normalize** — strip `--` and `/* */` comments, trim trailing `;`, collapse whitespace
+2. **Single statement** — reject any remaining `;` (multi-statement injection)
+3. **SELECT / WITH only** — first keyword must be `SELECT` or `WITH`
+4. **DML/DDL block-list** — regex word-boundary match for `DELETE`, `INSERT`, `UPDATE`, `DROP`, `CREATE`, `ALTER`, `TRUNCATE`, `PRAGMA`, `ATTACH`, `VACUUM`, `GRANT`, `REVOKE`
+5. **EXPLAIN check** — `EXPLAIN <sql>` against the live DB catches unknown columns, unknown tables, and syntax errors using SQLite's own planner
+
+**Auto-LIMIT injection**: if the query has no aggregate function (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP BY`, `DISTINCT`) and no `LIMIT` clause, `LIMIT 100` is appended before execution to protect the 1 M-row table.
+
+---
+
+## Running Tests
+
+### Unit tests (no API key required)
+
+```bash
+PYTHONPATH=. python3 -m unittest tests.test_unit -v
+```
+
+23 tests covering: `SQLValidator`, `SQLiteExecutor`, `_extract_sql`, token accounting. Each test creates an in-memory SQLite fixture — no external dependencies.
+
+### Integration / public tests (requires `OPENROUTER_API_KEY`)
+
+```bash
+OPENROUTER_API_KEY=sk-or-... PYTHONPATH=. python3 -m unittest tests.test_public -v
+```
+
+5 tests: answerable prompt, unanswerable prompt, invalid SQL rejection, timings, output contract.
+
+### Lint
+
+```bash
+python3 -m ruff check src tests scripts
+python3 -m black --check src tests scripts
+```
+
+---
 
 ## Benchmark
-Run:
+
+Runs all 12 prompts from `tests/public_prompts.json` × N repetitions and reports latency percentiles, success rate, and token efficiency.
 
 ```bash
-python3 scripts/benchmark.py --runs 3
+# Run 3 repetitions, save per-sample data for visualisation
+OPENROUTER_API_KEY=sk-or-... PYTHONPATH=. \
+  python3 scripts/benchmark.py --runs 3 --save-samples data/samples.jsonl
 ```
 
-This prints baseline-style latency stats (`avg`, `p50`, `p95`) and success rate.
+Sample output:
 
-**Reference metrics** (baseline on reference hardware): avg ~2900ms, p50 ~2500ms, p95 ~4700ms, ~600 tokens/request. 
+```
+=== Benchmark Results ===
+total_samples       : 36
+success_rate        : 97.22%
+avg_ms              : 3674
+p50_ms              : 3830
+p95_ms              : 4876
+avg_tokens_per_req  : 791.67
+avg_llm_calls_per_req: 1.97
+```
 
-## Deliverables
-1. Updated source code
-2. Added tests (if any)
-3. Completed `CHECKLIST.md` with all sections addressed
-4. Short engineering note (`SOLUTION_NOTES.md`) with:
-   - What you changed
-   - Why you changed it
-   - Measured impact (before/after benchmark numbers)
-   - Tradeoffs and next steps
+---
 
-## Optional Part: Multi-Turn Conversation Support
+## Visualising Results
 
-This is an **optional** part for candidates who want to demonstrate additional capabilities. It is **not required** for a complete submission, but may contribute to bonus evaluation.
+After running the benchmark with `--save-samples`, generate six charts with:
 
-### The Problem
+```bash
+python3 scripts/visualize.py data/samples.jsonl --out reports/
+```
 
-The current pipeline handles single, isolated questions. In real-world scenarios, users often ask follow-up questions that reference previous context:
+| Chart | Description |
+|---|---|
+| `latency_distribution.png` | Histogram of total request latency with p50/p95 lines |
+| `stage_breakdown.png` | Average time per pipeline stage |
+| `status_breakdown.png` | Pie chart: success / invalid_sql / unanswerable / error |
+| `tokens_vs_latency.png` | Scatter: tokens used vs latency, coloured by status |
+| `latency_over_time.png` | Latency per prompt across each run |
+| `stacked_stages.png` | Per-request stage breakdown (first 30 samples) |
 
-- "What is the addiction level distribution by gender?"
-- Follow-up: "What about males specifically?"
-- Follow-up: "Can you explain the highest value?"
-- Follow-up: "Now sort by anxiety score instead"
+---
 
-### Implementation Guidelines
+## CI/CD
 
-- You may implement this however you see fit: extend the existing pipeline, add new modules, or integrate directly into the LLM client.
-- No skeleton code or boilerplate is provided - design the solution architecture yourself.
-- If implemented, document your approach in `CHECKLIST.md` under a "Follow-Up Questions" section.
+Three GitHub Actions jobs defined in [.github/workflows/ci.yml](.github/workflows/ci.yml):
 
-## General Notes
-- The baseline intentionally leaves room for substantial optimization.
-- Hidden evaluation includes paraphrased prompts and edge/failure cases.
-- Public tests are integration tests and require a valid `OPENROUTER_API_KEY`.
-- Think beyond the obvious optimizations - the challenge tests your engineering judgment, not just your ability to follow a checklist.
+| Job | Trigger | What it does |
+|---|---|---|
+| `lint` | Every push / PR | `ruff check` + `black --check` across `src/`, `tests/`, `scripts/` |
+| `unit-tests` | Every push / PR | 23 unit tests on Python 3.11 and 3.12, no API key |
+| `integration-tests` | Push to `main` / manual dispatch | Full public test suite on live OpenRouter; requires `OPENROUTER_API_KEY` secret; gracefully skips if secret not set |
+
+Add your OpenRouter key as a repository secret named `OPENROUTER_API_KEY` to enable integration tests in CI.
+
+---
+
+## Design Decisions & Tradeoffs
+
+### Why `reasoning={"effort": "minimal"}`?
+
+`openai/gpt-5-nano` is a reasoning model. With the baseline `max_tokens=240`, the entire budget is consumed by hidden reasoning tokens and `content` is `None`. Setting `effort=minimal` + `max_tokens=512` leaves headroom for structured JSON output while keeping cost and latency low. Disabling reasoning entirely causes the model to refuse structured output on OpenRouter.
+
+### Why a 5-layer validator instead of a simpler allow-list?
+
+Defense in depth. Layer 3 (keyword check) is fast and catches obvious DML. Layer 5 (EXPLAIN) is the semantic net — it catches hallucinated column names and table names that pass the keyword check. The two layers together give both speed and correctness without a full SQL parser dependency.
+
+### Why is `enable_sql_repair=False` by default?
+
+Repair adds one LLM call on executor failure, which increases p95 latency unpredictably. The 5-layer validator already catches most bad SQL before execution. Repair is opt-in for callers that want maximum success rate at the cost of tail latency.
+
+### Why is the answer call short-circuited on empty rows?
+
+An LLM answering "no data found" is both expensive and unreliable — it may hallucinate an answer instead of admitting absence. A deterministic template is cheaper and more trustworthy.
+
+### Token efficiency
+
+| Technique | Saving |
+|---|---|
+| Schema-aware prompt (avoids hallucinated columns) | Fewer repair iterations |
+| `reasoning={"effort": "minimal"}` | ~50% fewer reasoning tokens |
+| Answer payload capped at 20 rows / 200-char strings | ~30% smaller answer prompt |
+| Unanswerable short-circuit | Saves 1 LLM call per unanswerable question |
+
+---
+
+## Benchmark Results
+
+Measured across 36 samples (3 runs × 12 prompts) on the live OpenRouter API:
+
+| Metric | Value |
+|---|---|
+| Success rate | **97.2%** |
+| Average latency | 3 674 ms |
+| p50 latency | 3 830 ms |
+| p95 latency | 4 876 ms |
+| Avg tokens / request | 791.67 |
+| Avg LLM calls / request | 1.97 |
+
+The baseline pipeline achieved **0%** success on the same model (content always `None`).
