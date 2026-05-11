@@ -39,6 +39,12 @@ def main() -> None:
     parser.add_argument(
         "--runs", type=int, default=3, help="Number of full prompt-set repetitions."
     )
+    parser.add_argument(
+        "--save-samples",
+        metavar="FILE",
+        default=None,
+        help="Write per-sample JSONL to this path for later visualisation.",
+    )
     args = parser.parse_args()
 
     db_path = _ensure_gaming_db()
@@ -53,15 +59,33 @@ def main() -> None:
     count = 0
     total_tokens = 0
     total_calls = 0
+    samples: list[dict] = []
 
-    for _ in range(args.runs):
+    for run_idx in range(args.runs):
         for prompt in prompts:
             result = pipeline.run(prompt)
-            totals.append(result.timings["total_ms"])
+            total_ms = result.timings["total_ms"]
+            tokens = int(result.total_llm_stats.get("total_tokens", 0))
+            calls = int(result.total_llm_stats.get("llm_calls", 0))
+            totals.append(total_ms)
             success += int(result.status == "success")
-            total_tokens += int(result.total_llm_stats.get("total_tokens", 0))
-            total_calls += int(result.total_llm_stats.get("llm_calls", 0))
+            total_tokens += tokens
+            total_calls += calls
             count += 1
+            samples.append(
+                {
+                    "run": run_idx,
+                    "prompt": prompt[:80],
+                    "status": result.status,
+                    "total_ms": round(total_ms, 2),
+                    "sql_generation_ms": round(result.timings.get("sql_generation_ms", 0), 2),
+                    "sql_validation_ms": round(result.timings.get("sql_validation_ms", 0), 2),
+                    "sql_execution_ms": round(result.timings.get("sql_execution_ms", 0), 2),
+                    "answer_generation_ms": round(result.timings.get("answer_generation_ms", 0), 2),
+                    "total_tokens": tokens,
+                    "llm_calls": calls,
+                }
+            )
 
     summary = {
         "runs": args.runs,
@@ -74,6 +98,14 @@ def main() -> None:
         "avg_llm_calls_per_request": round(total_calls / count, 2) if count else 0.0,
     }
     print(json.dumps(summary, indent=2))
+
+    if args.save_samples:
+        out = Path(args.save_samples)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w", encoding="utf-8") as fh:
+            for s in samples:
+                fh.write(json.dumps(s) + "\n")
+        print(f"\nSamples saved to {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":
