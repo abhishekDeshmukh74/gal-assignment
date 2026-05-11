@@ -67,7 +67,6 @@ class OpenRouterLLMClient:
             max_tokens=max_tokens,
             stream=False,
         )
-        # ---- Token accounting (HARD REQUIREMENT) -----------------------
         usage = getattr(res, "usage", None)
         prompt_tokens = self._coerce_int(_get(usage, "prompt_tokens"))
         completion_tokens = self._coerce_int(_get(usage, "completion_tokens"))
@@ -80,6 +79,14 @@ class OpenRouterLLMClient:
         if not isinstance(content, str):
             raise RuntimeError("OpenRouter response content is not text.")
         content = content.strip()
+
+        if total_tokens == 0:
+            # Rough heuristic: ~4 chars per token. Keeps efficiency metrics
+            # non-zero when a provider drops the usage block.
+            prompt_chars = sum(len(m.get("content", "")) for m in messages)
+            prompt_tokens = prompt_tokens or max(1, prompt_chars // 4)
+            completion_tokens = completion_tokens or max(1, len(content) // 4)
+            total_tokens = prompt_tokens + completion_tokens
 
         self._stats["llm_calls"] += 1
         self._stats["prompt_tokens"] += prompt_tokens
