@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from typing import Any
 
 _LOGGER_NAME = "analytics_pipeline"
@@ -12,8 +13,6 @@ _DEFAULT_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 
 class _JsonFormatter(logging.Formatter):
-    """Emit one JSON object per log record with structured 'extra' merged in."""
-
     _RESERVED = {
         "name", "msg", "args", "levelname", "levelno", "pathname",
         "filename", "module", "exc_info", "exc_text", "stack_info",
@@ -39,3 +38,20 @@ class _JsonFormatter(logging.Formatter):
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)
+
+
+def get_logger() -> logging.Logger:
+    logger = logging.getLogger(_LOGGER_NAME)
+    if getattr(logger, "_configured", False):
+        return logger
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(_JsonFormatter())
+    logger.addHandler(handler)
+    logger.setLevel(_DEFAULT_LEVEL)
+    logger.propagate = False
+    logger._configured = True  # type: ignore[attr-defined]
+    return logger
+
+
+def new_request_id() -> str:
+    return uuid.uuid4().hex[:12]
