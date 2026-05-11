@@ -14,6 +14,7 @@ Production hardening over the baseline:
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import time
@@ -136,7 +137,12 @@ class SQLValidator:
 
 
 class SQLiteExecutor:
-    def __init__(self, db_path: str | Path = DEFAULT_DB_PATH, fetch_limit: int = 100) -> None:
+    def __init__(
+        self, db_path: str | Path = DEFAULT_DB_PATH, fetch_limit: int | None = None
+    ) -> None:
+        fetch_limit = (
+            fetch_limit if fetch_limit is not None else int(os.getenv("DB_FETCH_LIMIT", "100"))
+        )
         self.db_path = Path(db_path)
         self.fetch_limit = fetch_limit
 
@@ -178,9 +184,15 @@ class AnalyticsPipeline:
         db_path: str | Path = DEFAULT_DB_PATH,
         llm_client: OpenRouterLLMClient | None = None,
         *,
-        enable_sql_repair: bool = False,
+        enable_sql_repair: bool | None = None,
         metrics: Metrics | None = None,
     ) -> None:
+        if enable_sql_repair is None:
+            enable_sql_repair = os.getenv("ENABLE_SQL_REPAIR", "false").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
         self.db_path = Path(db_path)
         self.metrics = metrics or Metrics()
         self.llm = llm_client or build_default_llm_client(metrics=self.metrics)

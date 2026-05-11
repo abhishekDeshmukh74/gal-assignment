@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 from pathlib import Path
@@ -37,7 +38,10 @@ def percentile(values: list[float], p: float) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--runs", type=int, default=3, help="Number of full prompt-set repetitions."
+        "--runs",
+        type=int,
+        default=int(os.getenv("BENCHMARK_RUNS", "3")),
+        help="Number of full prompt-set repetitions (default: $BENCHMARK_RUNS or 3).",
     )
     parser.add_argument(
         "--save-samples",
