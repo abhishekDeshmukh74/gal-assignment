@@ -213,8 +213,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve the benchmark dashboard locally.")
-    parser.add_argument("--port", type=int, default=8765, help="Port to listen on (default: 8765)")
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("DASHBOARD_PORT", "8765")),
+        help="Port to listen on (default: $DASHBOARD_PORT or 8765)",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.getenv("DASHBOARD_HOST", "127.0.0.1"),
+        help="Host to bind to (default: $DASHBOARD_HOST or 127.0.0.1)",
+    )
     args = parser.parse_args()
 
     # Pre-generate dashboard if samples already exist
