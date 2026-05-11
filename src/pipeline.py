@@ -12,6 +12,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = BASE_DIR / "data" / "gaming_mental_health.sqlite"
 _COMMENT_LINE_RE = re.compile(r"--[^\n]*")
 _COMMENT_BLOCK_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LEADING_KEYWORD_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
 
 
 class SQLValidationError(Exception):
@@ -41,6 +42,10 @@ class SQLValidator:
         normalized = self._normalize(sql)
         if not normalized:
             return self._fail(start, "Empty SQL after normalization")
+        if ";" in normalized:
+            return self._fail(start, "Multiple statements are not allowed")
+        if not _LEADING_KEYWORD_RE.match(normalized):
+            return self._fail(start, "Only SELECT/WITH queries are allowed")
         return SQLValidationOutput(
             is_valid=True, validated_sql=normalized, error=None,
             timing_ms=(time.perf_counter() - start) * 1000,
