@@ -13,6 +13,11 @@ DEFAULT_DB_PATH = BASE_DIR / "data" / "gaming_mental_health.sqlite"
 _COMMENT_LINE_RE = re.compile(r"--[^\n]*")
 _COMMENT_BLOCK_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _LEADING_KEYWORD_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
+_FORBIDDEN_KEYWORDS = re.compile(
+    r"\b(insert|update|delete|drop|alter|create|replace|truncate|attach|"
+    r"detach|pragma|vacuum|reindex|grant|revoke)\b",
+    re.IGNORECASE,
+)
 
 
 class SQLValidationError(Exception):
@@ -46,6 +51,9 @@ class SQLValidator:
             return self._fail(start, "Multiple statements are not allowed")
         if not _LEADING_KEYWORD_RE.match(normalized):
             return self._fail(start, "Only SELECT/WITH queries are allowed")
+        forbidden = _FORBIDDEN_KEYWORDS.search(normalized)
+        if forbidden:
+            return self._fail(start, f"Forbidden keyword: {forbidden.group(0).upper()}")
         return SQLValidationOutput(
             is_valid=True, validated_sql=normalized, error=None,
             timing_ms=(time.perf_counter() - start) * 1000,
