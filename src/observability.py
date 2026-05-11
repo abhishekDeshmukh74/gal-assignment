@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import uuid
+from threading import Lock
 from typing import Any
 
 _LOGGER_NAME = "analytics_pipeline"
@@ -55,3 +56,23 @@ def get_logger() -> logging.Logger:
 
 def new_request_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+class Metrics:
+    """In-process counters. Thread-safe."""
+
+    def __init__(self, history: int = 1000) -> None:
+        self._lock = Lock()
+        self._counters: dict[str, int] = {}
+        self._tokens_total = 0
+        self._llm_calls_total = 0
+        self._history = history
+
+    def incr(self, name: str, by: int = 1) -> None:
+        with self._lock:
+            self._counters[name] = self._counters.get(name, 0) + by
+
+    def add_llm_usage(self, total_tokens: int, calls: int = 1) -> None:
+        with self._lock:
+            self._tokens_total += int(total_tokens or 0)
+            self._llm_calls_total += int(calls or 0)
