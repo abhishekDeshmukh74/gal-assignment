@@ -58,7 +58,9 @@ assignment_v0.2/
 │   └── observability.py    # JSON logging, Metrics (p50/p95), stage_span
 ├── scripts/
 │   ├── benchmark.py        # Benchmark runner (--runs, --save-samples)
-│   ├── visualize.py        # Chart generator from benchmark JSONL
+│   ├── visualize.py        # Static PNG chart generator from benchmark JSONL
+│   ├── gen_dashboard.py    # Interactive HTML dashboard generator (Plotly CDN)
+│   ├── serve.py            # Local HTTP server — serves dashboard + /benchmark /status routes
 │   └── gaming_csv_to_db.py # Kaggle CSV → SQLite ingestion
 ├── tests/
 │   ├── test_public.py      # 5 integration tests (unmodified)
@@ -314,6 +316,8 @@ avg_llm_calls_per_req: 1.97
 
 ## Visualising Results
 
+### Static PNG charts
+
 After running the benchmark with `--save-samples`, generate six charts with:
 
 ```bash
@@ -328,6 +332,42 @@ python3 scripts/visualize.py data/samples.jsonl --out reports/
 | `tokens_vs_latency.png` | Scatter: tokens used vs latency, coloured by status |
 | `latency_over_time.png` | Latency per prompt across each run |
 | `stacked_stages.png` | Per-request stage breakdown (first 30 samples) |
+
+### Interactive HTML dashboard
+
+Generates a single self-contained `reports/dashboard.html` (no extra Python deps; Plotly loaded from CDN):
+
+```bash
+# Generate and auto-open in browser
+python3 scripts/gen_dashboard.py data/samples.jsonl
+
+# Custom output path, no auto-open
+python3 scripts/gen_dashboard.py data/samples.jsonl --out reports/dashboard.html --no-open
+```
+
+The dashboard includes 7 KPI cards and 6 interactive Plotly charts — hover, zoom, and pan in the browser with no server required.
+
+### Dashboard HTTP server
+
+Serve the dashboard (and optionally trigger a fresh benchmark run) via a local HTTP API:
+
+```bash
+# Start the server (default port 8765)
+OPENROUTER_API_KEY=sk-or-... PYTHONPATH=. python3 scripts/serve.py
+
+# Custom port
+PYTHONPATH=. python3 scripts/serve.py --port 9000
+```
+
+**Endpoints:**
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Redirect to `/dashboard` |
+| `GET` | `/dashboard` | Serve the interactive HTML dashboard (auto-generates if missing) |
+| `POST` | `/benchmark` | Run benchmark in background, regenerate dashboard when done |
+| `GET` | `/status` | JSON status: last benchmark run time, sample count, success rate |
+| `GET` | `/samples` | Raw JSONL samples as JSON array |
 
 ---
 
