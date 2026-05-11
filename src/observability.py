@@ -1,11 +1,19 @@
-"""Lightweight observability: JSON logging, in-process metrics, request_id tracing."""
+"""Lightweight observability: JSON logging, in-process metrics, request_id tracing.
+
+Designed to map cleanly onto OpenTelemetry / Prometheus in a real deployment
+without pulling extra dependencies for this take-home.
+"""
+
 from __future__ import annotations
+
 import json
 import logging
 import os
 import sys
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from threading import Lock
 from typing import Any
 
@@ -14,11 +22,31 @@ _DEFAULT_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 
 class _JsonFormatter(logging.Formatter):
+    """Emit one JSON object per log record, with structured 'extra' merged in."""
+
     _RESERVED = {
-        "name", "msg", "args", "levelname", "levelno", "pathname",
-        "filename", "module", "exc_info", "exc_text", "stack_info",
-        "lineno", "funcName", "created", "msecs", "relativeCreated",
-        "thread", "threadName", "processName", "process", "message", "taskName",
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "message",
+        "taskName",
     }
 
     def format(self, record: logging.LogRecord) -> str:
@@ -59,7 +87,11 @@ def new_request_id() -> str:
 
 
 class Metrics:
-    """In-process metrics: counters + per-stage timing buffers. Thread-safe."""
+    """In-process metrics: counters + per-stage timing buffers.
+
+    Thread-safe. Suitable as a drop-in replacement target for a Prometheus
+    client (counters/histograms map 1:1).
+    """
 
     def __init__(self, history: int = 1000) -> None:
         self._lock = Lock()
@@ -111,3 +143,54 @@ class Metrics:
                 "llm_tokens_total": self._tokens_total,
                 "llm_calls_total": self._llm_calls_total,
             }
+
+
+@contextmanager
+def stage_span(
+    logger: logging.Logger,
+    metrics: Metrics,
+    *,
+    request_id: str,
+    stage: str,
+    **extra: Any,
+) -> Iterator[dict[str, Any]]:
+    """Time a pipeline stage, emit start/end logs, record metrics.
+
+    Yields a mutable dict you can populate with stage-specific fields
+    (e.g. {'sql_preview': ..., 'row_count': ...}); they are emitted on the end log.
+    """
+    span: dict[str, Any] = {}
+    t0 = time.perf_counter()
+    logger.info("stage.start", extra={"request_id": request_id, "stage": stage, **extra})
+    try:
+        yield span
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        metrics.observe(f"stage.{stage}.duration_ms", elapsed_ms)
+        metrics.incr(f"stage.{stage}.error")
+        logger.error(
+            "stage.error",
+            extra={
+                "request_id": request_id,
+                "stage": stage,
+                "duration_ms": round(elapsed_ms, 2),
+                "error": str(exc),
+                **extra,
+                **span,
+            },
+        )
+        raise
+    else:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        metrics.observe(f"stage.{stage}.duration_ms", elapsed_ms)
+        metrics.incr(f"stage.{stage}.ok")
+        logger.info(
+            "stage.end",
+            extra={
+                "request_id": request_id,
+                "stage": stage,
+                "duration_ms": round(elapsed_ms, 2),
+                **extra,
+                **span,
+            },
+        )
