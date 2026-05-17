@@ -14,6 +14,7 @@ import argparse
 import json
 import statistics
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -51,6 +52,7 @@ def build_html(samples: list[dict]) -> str:
     avg_ms = statistics.mean(total_ms)
     p50 = pct(total_ms, 50)
     p95 = pct(total_ms, 95)
+    p99 = pct(total_ms, 99)
     avg_tokens = statistics.mean(tokens)
     avg_calls = statistics.mean(calls)
 
@@ -76,7 +78,8 @@ def build_html(samples: list[dict]) -> str:
     ]
     stacked_stages = {col: [s[col] for s in top30] for col in stage_cols}
 
-    # Embed all data as JSON for Plotly
+    # Embed all data as JSON for Plotly.
+    # Escape '</' to prevent script-tag breakout (XSS via prompt strings).
     data_json = json.dumps(
         {
             "total_ms": total_ms,
@@ -93,7 +96,7 @@ def build_html(samples: list[dict]) -> str:
             "stacked_stages": stacked_stages,
             "stage_cols": stage_cols,
         }
-    )
+    ).replace("</", "<\/")
 
     status_color_map = {
         "success": "#22c55e",
@@ -103,12 +106,15 @@ def build_html(samples: list[dict]) -> str:
     }
     status_colors_json = json.dumps(status_color_map)
 
+    generated_date = datetime.now(timezone.utc).strftime("%B %Y")
+
     kpi_cards = f"""
         <div class="kpi-grid">
           <div class="kpi"><div class="kpi-val">{success_rate:.1f}%</div><div class="kpi-label">Success Rate</div></div>
           <div class="kpi"><div class="kpi-val">{avg_ms:,.0f} ms</div><div class="kpi-label">Avg Latency</div></div>
           <div class="kpi"><div class="kpi-val">{p50:,.0f} ms</div><div class="kpi-label">p50 Latency</div></div>
           <div class="kpi"><div class="kpi-val">{p95:,.0f} ms</div><div class="kpi-label">p95 Latency</div></div>
+          <div class="kpi"><div class="kpi-val">{p99:,.0f} ms</div><div class="kpi-label">p99 Latency</div></div>
           <div class="kpi"><div class="kpi-val">{avg_tokens:,.0f}</div><div class="kpi-label">Avg Tokens / Req</div></div>
           <div class="kpi"><div class="kpi-val">{avg_calls:.2f}</div><div class="kpi-label">Avg LLM Calls / Req</div></div>
           <div class="kpi"><div class="kpi-val">{len(samples)}</div><div class="kpi-label">Total Samples</div></div>
@@ -221,7 +227,7 @@ def build_html(samples: list[dict]) -> str:
     <h1>GenAI Analytics Pipeline — Benchmark Dashboard
       <span class="badge">Live Data</span>
     </h1>
-    <p>model: openai/gpt-5-nano &nbsp;·&nbsp; dataset: gaming_mental_health (1M rows) &nbsp;·&nbsp; generated May 2026</p>
+    <p>model: openai/gpt-5-nano &nbsp;·&nbsp; dataset: gaming_mental_health (1M rows) &nbsp;·&nbsp; generated {generated_date}</p>
   </header>
   <main>
     {kpi_cards}
@@ -252,7 +258,6 @@ def build_html(samples: list[dict]) -> str:
       </div>
     </div>
   </main>
-  <footer>GenAI-Labs Take-Home Assignment — Abhishek Deshmukh — 2026</footer>
 
   <script>
   (function() {{

@@ -17,6 +17,7 @@ Default paths:
 """
 
 import argparse
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -37,6 +38,15 @@ SQLITE_TYPE_MAP = {
     "datetime64[ns]": "TEXT",
     "object": "TEXT",
 }
+
+
+def _valid_table_name(value: str) -> str:
+    """argparse type validator: reject table names that could be used for injection."""
+    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', value):
+        raise argparse.ArgumentTypeError(
+            f"Invalid table name '{value}'. Must match ^[A-Za-z_][A-Za-z0-9_]*$"
+        )
+    return value
 
 
 def map_pd_dtype_to_sql(dtype) -> str:
@@ -212,6 +222,7 @@ def main():
     )
     parser.add_argument(
         "--table",
+        type=_valid_table_name,
         default=DEFAULT_TABLE_NAME,
         help=f"Name of the table to create (default: {DEFAULT_TABLE_NAME})",
     )

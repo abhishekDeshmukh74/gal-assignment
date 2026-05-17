@@ -10,6 +10,7 @@ Production hardening over the baseline:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -20,6 +21,10 @@ from src.observability import Metrics, get_logger
 from src.types import AnswerGenerationOutput, SQLGenerationOutput
 
 DEFAULT_MODEL = "openai/gpt-5-nano"
+
+_LLM_CALL_TIMEOUT_S: float = float(os.getenv("LLM_CALL_TIMEOUT_S", "30"))
+_LLM_MAX_RETRIES: int = 2
+_RETRYABLE_ERRORS = ("429", "503", "502", "rate limit", "timeout", "overloaded")
 
 _SQL_SYSTEM_PROMPT = (
     "You translate analytics questions into a single SQLite query.\n"
@@ -79,6 +84,35 @@ class OpenRouterLLMClient:
         return out
 
     # --------------------------------------------------------------- transport
+    def _send_with_retry(self, send_kwargs: dict[str, Any]) -> Any:
+        """Submit an SDK call with wall-clock timeout and exponential-backoff retry."""
+        delay = 1.0
+        for attempt in range(_LLM_MAX_RETRIES + 1):
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(self._client.chat.send, **send_kwargs)
+                    try:
+                        return future.result(timeout=_LLM_CALL_TIMEOUT_S)
+                    except concurrent.futures.TimeoutError:
+                        raise RuntimeError(
+                            f"LLM call timed out after {_LLM_CALL_TIMEOUT_S:.0f}s"
+                        )
+            except RuntimeError:
+                raise  # timeout — don't retry
+            except Exception as exc:
+                if attempt < _LLM_MAX_RETRIES and any(
+                    code in str(exc).lower() for code in _RETRYABLE_ERRORS
+                ):
+                    self._log.warning(
+                        "llm.transient_error_retrying",
+                        extra={"attempt": attempt + 1, "delay_s": delay, "error": str(exc)},
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    raise
+        raise RuntimeError("unreachable")  # satisfies type checker
+
     def _chat(self, messages: list[dict[str, str]], temperature: float, max_tokens: int) -> str:
         t0 = time.perf_counter()
         # The default model (`openai/gpt-5-nano`) is a reasoning model: it
@@ -93,10 +127,13 @@ class OpenRouterLLMClient:
         )
         try:
             send_kwargs["reasoning"] = {"effort": "minimal"}
-            res = self._client.chat.send(**send_kwargs)
-        except Exception:
+            res = self._send_with_retry(send_kwargs)
+        except Exception as _reasoning_exc:
+            self._log.debug(
+                "llm.reasoning_kwarg_unsupported", extra={"error": str(_reasoning_exc)}
+            )
             send_kwargs.pop("reasoning", None)
-            res = self._client.chat.send(**send_kwargs)
+            res = self._send_with_retry(send_kwargs)
 
         # ---- Token accounting (HARD REQUIREMENT) -------------------------
         # OpenRouter returns OpenAI-compatible usage. Be defensive: providers
@@ -273,7 +310,7 @@ class OpenRouterLLMClient:
             )
         except Exception as exc:
             error = str(exc)
-            answer = f"Error generating answer: {error}"
+            answer = "Unable to generate an answer at this time."
 
         timing_ms = (time.perf_counter() - start) * 1000
         llm_stats = self.pop_stats()

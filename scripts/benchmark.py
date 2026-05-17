@@ -5,6 +5,7 @@ import json
 import os
 import statistics
 import sys
+from collections import Counter
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -95,9 +96,11 @@ def main() -> None:
         "runs": args.runs,
         "samples": count,
         "success_rate": round(success / count, 4) if count else 0.0,
+        "status_counts": dict(Counter(s["status"] for s in samples)),
         "avg_ms": round(statistics.fmean(totals), 2) if totals else 0.0,
         "p50_ms": round(percentile(totals, 50), 2),
         "p95_ms": round(percentile(totals, 95), 2),
+        "p99_ms": round(percentile(totals, 99), 2),
         "avg_tokens_per_request": round(total_tokens / count, 2) if count else 0.0,
         "avg_llm_calls_per_request": round(total_calls / count, 2) if count else 0.0,
     }

@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,14 @@ from src.types import (
 BASE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = BASE_DIR / "data" / "gaming_mental_health.sqlite"
 
+# Per-model blended cost estimate (input+output) per 1 000 tokens.
+# Add entries as new models are used; unknown models default to 0.0.
+_COST_PER_1K_TOKENS: dict[str, float] = {
+    "openai/gpt-5-nano": 0.0003,
+    "openai/gpt-4o-mini": 0.00015,
+    "openai/gpt-4o": 0.005,
+}
+
 # Block-list for write/admin keywords. Word-boundary anchored so column names
 # like `created_at` won't false-positive.
 _FORBIDDEN_KEYWORDS = re.compile(
@@ -41,7 +50,7 @@ _FORBIDDEN_KEYWORDS = re.compile(
     r"detach|pragma|vacuum|reindex|grant|revoke)\b",
     re.IGNORECASE,
 )
-_AGGREGATE_RE = re.compile(r"\b(count|sum|avg|min|max|group\s+by|distinct)\b", re.IGNORECASE)
+_AGGREGATE_RE = re.compile(r"\b(count|sum|avg|min|max|group\s+by)\b", re.IGNORECASE)
 _LIMIT_RE = re.compile(r"\blimit\b", re.IGNORECASE)
 _LEADING_KEYWORD_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
 _COMMENT_LINE_RE = re.compile(r"--[^\n]*")
@@ -145,6 +154,7 @@ class SQLiteExecutor:
         )
         self.db_path = Path(db_path)
         self.fetch_limit = fetch_limit
+        self.query_timeout_s = float(os.getenv("DB_QUERY_TIMEOUT_S", "30"))
 
     def run(self, sql: str | None) -> SQLExecutionOutput:
         start = time.perf_counter()
@@ -159,10 +169,16 @@ class SQLiteExecutor:
 
         try:
             with sqlite3.connect(self.db_path) as conn:
+                conn.execute("PRAGMA busy_timeout = 5000")
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                cur.execute(sql)
-                rows = [dict(r) for r in cur.fetchmany(self.fetch_limit)]
+                timer = threading.Timer(self.query_timeout_s, conn.interrupt)
+                timer.start()
+                try:
+                    cur.execute(sql)
+                    rows = [dict(r) for r in cur.fetchmany(self.fetch_limit)]
+                finally:
+                    timer.cancel()
             return SQLExecutionOutput(
                 rows=rows,
                 row_count=len(rows),
@@ -201,6 +217,11 @@ class AnalyticsPipeline:
         self.enable_sql_repair = enable_sql_repair
         self._log = get_logger()
         self._schema = self._introspect_schema()
+        if not self._schema:
+            raise RuntimeError(
+                f"Schema introspection returned empty result for DB: {self.db_path}. "
+                "Ensure the database exists and contains tables."
+            )
 
     def _introspect_schema(self) -> str:
         """Build a compact `table(col TYPE, ...)` description for the prompt."""
@@ -369,6 +390,8 @@ class AnalyticsPipeline:
             if s.get("model"):
                 model = s["model"]
         agg["model"] = model
+        rate = _COST_PER_1K_TOKENS.get(model, 0.0)
+        agg["estimated_cost_usd"] = round(agg["total_tokens"] / 1000.0 * rate, 6)
         return agg
 
     @staticmethod

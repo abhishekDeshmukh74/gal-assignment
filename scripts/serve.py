@@ -33,6 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 SAMPLES_PATH = PROJECT_ROOT / "data" / "samples.jsonl"
+SAMPLES_TMP_PATH = SAMPLES_PATH.with_name(SAMPLES_PATH.name + ".tmp")
 DASHBOARD_PATH = PROJECT_ROOT / "reports" / "dashboard.html"
 
 # Shared state (protected by _lock)
@@ -42,6 +43,7 @@ _state: dict = {
     "last_run_ts": None,
     "last_run_samples": 0,
     "last_run_success_rate": None,
+    "last_run_time": 0.0,
     "error": None,
 }
 
@@ -94,7 +96,7 @@ def _run_benchmark_thread(runs: int) -> None:
                 "--runs",
                 str(runs),
                 "--save-samples",
-                str(SAMPLES_PATH),
+                str(SAMPLES_TMP_PATH),  # write to tmp; atomically swapped on success
             ],
             capture_output=True,
             text=True,
@@ -105,16 +107,27 @@ def _run_benchmark_thread(runs: int) -> None:
             with _lock:
                 _state["error"] = result.stderr[-500:] if result.stderr else "unknown error"
         else:
+            # Atomic swap: replace the live file only after a complete successful write.
+            os.replace(str(SAMPLES_TMP_PATH), str(SAMPLES_PATH))
             samples = _load_samples()
+            # A2: report success rate for the latest run only (highest run index).
+            if samples:
+                latest_run = max(s.get("run", 0) for s in samples)
+                latest_samples = [s for s in samples if s.get("run") == latest_run]
+            else:
+                latest_samples = []
             success_rate = (
-                sum(1 for s in samples if s.get("status") == "success") / len(samples) * 100
-                if samples
+                sum(1 for s in latest_samples if s.get("status") == "success")
+                / len(latest_samples)
+                * 100
+                if latest_samples
                 else 0.0
             )
             with _lock:
                 _state["last_run_ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                _state["last_run_samples"] = len(samples)
+                _state["last_run_samples"] = len(latest_samples)
                 _state["last_run_success_rate"] = round(success_rate, 2)
+                _state["last_run_time"] = time.time()  # S4: record for cooldown
             _ensure_dashboard()
     finally:
         with _lock:
@@ -188,13 +201,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 body = json.loads(body_raw) if body_raw else {}
             except json.JSONDecodeError:
                 body = {}
-            runs = int(body.get("runs", 3))
+            runs = max(1, min(int(body.get("runs", 3)), 10))
 
             with _lock:
                 already_running = _state["benchmark_running"]
+                cooldown_remaining = max(
+                    0.0, 60.0 - (time.time() - (_state.get("last_run_time") or 0.0))
+                )
+                if not already_running and cooldown_remaining == 0.0:
+                    _state["benchmark_running"] = True  # reserve slot atomically
 
             if already_running:
                 self._send_json(409, {"error": "A benchmark run is already in progress."})
+                return
+            if cooldown_remaining > 0.0:
+                self._send_json(
+                    429,
+                    {"error": f"Rate limited. Try again in {int(cooldown_remaining + 1)}s."},
+                )
                 return
 
             thread = threading.Thread(target=_run_benchmark_thread, args=(runs,), daemon=True)

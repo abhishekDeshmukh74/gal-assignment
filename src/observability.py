@@ -134,6 +134,7 @@ class Metrics:
                     "avg_ms": round(sum(vals) / len(vals), 2) if vals else 0.0,
                     "p50_ms": round(self._percentile(vals, 50), 2),
                     "p95_ms": round(self._percentile(vals, 95), 2),
+                    "p99_ms": round(self._percentile(vals, 99), 2),
                 }
                 for name, vals in self._timings.items()
             }
